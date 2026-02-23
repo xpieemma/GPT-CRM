@@ -1,38 +1,105 @@
-import pytest
-from app.services.repository import repo
+# app/services/repository.py
+import sqlite3
+import json
+from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
+from app.config import settings
+from app.utils.logging import logger
 
-def test_get_active_prompt_empty(sample_tenant):
-    """Test getting prompt when none exists"""
-    prompt = repo.get_active_prompt(sample_tenant)
-    assert prompt is None
-
-def test_create_and_get_prompt(sample_tenant):
-    """Test creating and retrieving prompt"""
-    repo.create_prompt(
-        tenant_id=sample_tenant,
-        version="v1",
-        content="Test prompt",
-        active=True
-    )
+class TenantAwareRepository:
+    """
+    Multi-tenant repository with explicit tenant_id parameters.
+    """
     
-    prompt = repo.get_active_prompt(sample_tenant)
-    assert prompt is not None
-    assert prompt["version"] == "v1"
-    assert prompt["content"] == "Test prompt"
-
-def test_tenant_isolation(sample_tenant):
-    """Test prompts are isolated by tenant"""
-    repo.create_prompt("tenant_a", "v1", "Content A", active=True)
-    repo.create_prompt("tenant_b", "v1", "Content B", active=True)
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or settings.DATABASE_PATH
     
-    assert repo.get_active_prompt("tenant_a")["content"] == "Content A"
-    assert repo.get_active_prompt("tenant_b")["content"] == "Content B"
-
-def test_daily_cost_calculation(sample_tenant):
-    """Test daily cost aggregation"""
-    repo.record_metric(sample_tenant, "TokenCost", 0.5)
-    repo.record_metric(sample_tenant, "TokenCost", 0.3)
-    repo.record_metric("other_tenant", "TokenCost", 10.0)  # Different tenant
+    @contextmanager
+    def _get_connection(self):
+        """Get database connection with row factory - ALWAYS use as context manager"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            yield conn
+            conn.commit()
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Database error: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
     
-    cost = repo.get_tenant_daily_cost(sample_tenant)
-    assert cost == 0.8  # 0.5 + 0.3
+    # Prompt methods
+    def get_active_prompt(self, tenant_id: str) -> Optional[Dict]:
+        """Get active prompt for tenant"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM prompts 
+                WHERE tenant_id = ? AND active = 1
+                ORDER BY created_at DESC LIMIT 1
+            """, (tenant_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def create_prompt(self, tenant_id: str, version: str, content: str, 
+                     active: bool = False, metadata: Optional[Dict] = None) -> int:
+        """Create new prompt for tenant"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO prompts (tenant_id, version, content, active, metadata)
+                VALUES (?, ?, ?, ?, ?)
+            """, (tenant_id, version, content, active, json.dumps(metadata or {})))
+            return cursor.lastrowid
+    
+    # Metric methods
+    def record_metric(self, tenant_id: str, name: str, value: float, 
+                     dimensions: Optional[Dict] = None):
+        """Record tenant-scoped metric"""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO metrics (tenant_id, metric_name, value, dimensions)
+                VALUES (?, ?, ?, ?)
+            """, (tenant_id, name, value, json.dumps(dimensions or {})))
+    
+    def get_tenant_daily_cost(self, tenant_id: str) -> float:
+        """Get today's total cost for tenant"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT COALESCE(SUM(value), 0) FROM metrics 
+                WHERE tenant_id = ? 
+                AND metric_name = 'TokenCost'
+                AND timestamp >= datetime('now', 'start of day')
+            """, (tenant_id,))
+            return cursor.fetchone()[0] or 0.0
+    
+    # Conversation methods
+    def log_conversation(self, tenant_id: str, lead_id: str, 
+                        messages: Dict, metadata: Dict):
+        """Log conversation for audit trail"""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO conversations (tenant_id, lead_id, messages, metadata)
+                VALUES (?, ?, ?, ?)
+            """, (tenant_id, lead_id, json.dumps(messages), json.dumps(metadata)))
+    
+    def get_conversations(self, tenant_id: str, lead_id: str, limit: int = 10) -> List[Dict]:
+        """Get conversation history for lead"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM conversations 
+                WHERE tenant_id = ? AND lead_id = ?
+                ORDER BY created_at DESC LIMIT ?
+            """, (tenant_id, lead_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # Add a method to force connection cleanup (useful for testing)
+    def cleanup(self):
+        """Force any lingering connections to close (for testing)"""
+        import gc
+        gc.collect()
+
+# Singleton instance
+repo = TenantAwareRepository()

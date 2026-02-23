@@ -1,5 +1,8 @@
 import sqlite3
 import json
+import os
+import gc
+import time
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
 from app.config import settings
@@ -101,6 +104,34 @@ class TenantAwareRepository:
                 ORDER BY created_at DESC LIMIT ?
             """, (tenant_id, lead_id, limit))
             return [dict(row) for row in cursor.fetchall()]
+        
+
+    def cleanup(self, force_delete: bool = False):
+        """Clean up resources and optionally force database file deletion for testing"""
+        import gc
+        import time
+        
+        # Force garbage collection to close any lingering connections
+        gc.collect()
+        
+        # Give the OS a moment to release file handles
+        time.sleep(0.1)
+        
+        # For testing, we can try to delete the database file
+        if force_delete and hasattr(self, 'db_path') and self.db_path != ":memory:":
+            try:
+                if os.path.exists(self.db_path):
+                    os.remove(self.db_path)
+                    print(f"✅ Deleted test database: {self.db_path}")
+            except PermissionError:
+                print(f"⚠️  Could not delete {self.db_path} - might still be in use")
+                # One more GC attempt
+                gc.collect()
+                time.sleep(0.1)
+                try:
+                    os.remove(self.db_path)
+                except:
+                    pass  # Give up gracefully
 
 # Singleton instance
 repo = TenantAwareRepository()

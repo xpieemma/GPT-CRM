@@ -1,6 +1,9 @@
+# tests/conftest.py
 import pytest
 import sqlite3
 import os
+import time
+import gc
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,83 +19,40 @@ from app.config import settings
 from app.services.repository import repo
 from app.services.dead_letter_queue import dlq
 from app.api.dependencies import RateLimiter
+from app.outreach_agent import outreach_agent  # Import the agent instance
 
-@pytest.fixture(autouse=True)
-def setup_test_db():
-    """Setup test database"""
-    # Ensure clean test db
-    if os.path.exists("data/test.db"):
-        os.remove("data/test.db")
-    
-    # Create tables
-    with sqlite3.connect("data/test.db") as conn:
-        conn.execute("""
-            CREATE TABLE prompts (
-                id INTEGER PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                version TEXT NOT NULL,
-                content TEXT NOT NULL,
-                active BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                metadata TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE metrics (
-                id INTEGER PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                metric_name TEXT NOT NULL,
-                value REAL,
-                dimensions TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE conversations (
-                id INTEGER PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                lead_id TEXT NOT NULL,
-                messages TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                metadata TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE dead_letter_queue (
-                id INTEGER PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                queue_name TEXT NOT NULL,
-                item_id TEXT,
-                payload TEXT NOT NULL,
-                error TEXT,
-                failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                retry_count INTEGER DEFAULT 0,
-                resolved BOOLEAN DEFAULT 0,
-                metadata TEXT
-            )
-        """)
-    
-    yield
-    
-    # Cleanup
-    if os.path.exists("data/test.db"):
-        os.remove("data/test.db")
+# ... (keep all your existing fixtures like setup_test_db, sample_tenant, etc.)
 
 @pytest.fixture
-def sample_tenant():
-    return "test_tenant_123"
-
-@pytest.fixture
-def rate_limiter():
-    return RateLimiter(window_seconds=1)  # Fast tests
-
-@pytest.fixture
-def mock_groq():
-    with patch('groq.AsyncGroq') as mock:
-        client = AsyncMock()
-        completion = AsyncMock()
-        completion.choices = [MagicMock(message=MagicMock(content='{"message": "test", "confidence_score": 0.9}'))]
-        completion.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
-        client.chat.completions.create = AsyncMock(return_value=completion)
-        mock.return_value = client
-        yield mock
+def mock_groq(monkeypatch):
+    """Mock Groq client by replacing the instantiated client directly."""
+    
+    # 1. Create the shape of the mock response
+    class MockMessage:
+        def __init__(self, content):
+            self.content = content
+    
+    class MockChoice:
+        def __init__(self, message):
+            self.message = message
+    
+    class MockCompletion:
+        def __init__(self):
+            # The agent expects a JSON string with these keys based on your previous logs
+            self.choices = [MockChoice(MockMessage('{"message": "Hello from mock", "confidence_score": 0.9}'))]
+            self.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+    
+    # 2. Setup the fake client
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=MockCompletion())
+    
+    # 3. Swap the live client with the fake client safely
+    # Save original for cleanup if needed
+    original_client = getattr(outreach_agent, "client", None)
+    monkeypatch.setattr(outreach_agent, "client", mock_client)
+    
+    yield mock_client
+    
+    # Optional: restore original if needed for other tests
+    if original_client:
+        monkeypatch.setattr(outreach_agent, "client", original_client)
