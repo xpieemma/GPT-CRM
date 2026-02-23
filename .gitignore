@@ -1,0 +1,63 @@
+# --- Python environments ---
+venv/
+env/
+ENV/
+.env
+.env.local
+.env.*.local
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.python-version
+
+# --- Local Python installations ---
+python311/
+python311.zip
+python311-installer.exe
+Python/
+
+# --- SQLite database ---
+data/*.db
+data/*.db-journal
+data/*.sqlite
+data/*.sqlite3
+*.db
+
+# --- Logs ---
+*.log
+logs/
+*.log.*
+
+# --- Test and coverage ---
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.cache
+*.cover
+*.py,cover
+
+# --- Distribution / packaging ---
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# --- IDE / Editor files ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Project specific ---
+# Add any local config files
+config.local.yaml
+secrets.yaml
