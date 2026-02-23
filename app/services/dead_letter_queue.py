@@ -1,3 +1,4 @@
+import contextlib
 import sqlite3
 import json
 from typing import Optional, Dict, Any, List
@@ -8,8 +9,7 @@ class DeadLetterQueue:
     """
     Persistent dead letter queue with tenant isolation.
     
-    Uses Python-side JSON merging for cross-platform compatibility
-    (avoids SQLite JSON1 extension dependency).
+    Uses Python-side JSON merging for cross-platform compatibility.
     """
     
     def __init__(self, db_path: str = None):
@@ -19,64 +19,73 @@ class DeadLetterQueue:
              item_id: Optional[str] = None, error: Optional[str] = None,
              metadata: Optional[Dict] = None) -> int:
         """Push failed item to DLQ"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                INSERT INTO dead_letter_queue 
-                (queue_name, tenant_id, item_id, payload, error, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                queue_name,
-                tenant_id,
-                item_id,
-                json.dumps(payload),
-                error,
-                json.dumps(metadata) if metadata else None
-            ))
-            
-            dlq_id = cursor.lastrowid
-            
-            logger.warning(f"Item added to DLQ", extra={
-                "dlq_id": dlq_id,
-                "queue": queue_name,
-                "tenant": tenant_id
-            })
-            
-            return dlq_id
+        # Wrap in closing() to prevent Segmentation Faults on exit
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn: # Handles transaction commit/rollback
+                cursor = conn.execute("""
+                    INSERT INTO dead_letter_queue 
+                    (queue_name, tenant_id, item_id, payload, error, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    queue_name,
+                    tenant_id,
+                    item_id,
+                    json.dumps(payload),
+                    error,
+                    json.dumps(metadata) if metadata else None
+                ))
+                
+                dlq_id = cursor.lastrowid
+                
+                logger.warning(f"Item added to DLQ", extra={
+                    "dlq_id": dlq_id,
+                    "queue": queue_name,
+                    "tenant": tenant_id
+                })
+                
+                return dlq_id
     
     def mark_resolved(self, dlq_id: int, metadata: Optional[Dict] = None):
         """
         Mark DLQ item as resolved.
         
-        Uses Python-side JSON merge instead of SQLite json_patch()
-        for cross-platform compatibility.
+        Raises ValueError if the item doesn't exist.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            # Read current metadata
-            cursor = conn.execute(
-                "SELECT metadata FROM dead_letter_queue WHERE id = ?", 
-                (dlq_id,)
-            )
-            row = cursor.fetchone()
-            current = json.loads(row[0]) if row and row[0] else {}
-            
-            # Merge in Python (works everywhere)
-            if metadata:
-                current.update(metadata)
-            
-            # Write back
-            conn.execute("""
-                UPDATE dead_letter_queue 
-                SET resolved = 1, 
-                    resolved_at = CURRENT_TIMESTAMP,
-                    metadata = ?
-                WHERE id = ?
-            """, (json.dumps(current), dlq_id))
-            
-            logger.info(f"DLQ item {dlq_id} resolved")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                # First check if the item exists
+                cursor = conn.execute(
+                    "SELECT id, metadata FROM dead_letter_queue WHERE id = ?", 
+                    (dlq_id,)
+                )
+                row = cursor.fetchone()
+                
+                # Raise error if item doesn't exist
+                if not row:
+                    raise ValueError(f"DLQ item with id {dlq_id} not found")
+                
+                # Read current metadata
+                current = json.loads(row[1]) if row[1] else {}
+                
+                # Merge in Python
+                if metadata:
+                    current.update(metadata)
+                
+                # Write back
+                conn.execute("""
+                    UPDATE dead_letter_queue 
+                    SET resolved = 1, 
+                        resolved_at = CURRENT_TIMESTAMP,
+                        metadata = ?
+                    WHERE id = ?
+                """, (json.dumps(current), dlq_id))
+                
+                logger.info(f"DLQ item {dlq_id} resolved")
     
     def get_tenant_stats(self, tenant_id: str) -> Dict:
         """Get DLQ statistics for tenant"""
-        with sqlite3.connect(self.db_path) as conn:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            # We don't need 'with conn' here as we are only reading
             cursor = conn.execute("""
                 SELECT 
                     queue_name,

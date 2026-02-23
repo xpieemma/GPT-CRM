@@ -4,7 +4,6 @@ import os
 import time
 import gc
 import uuid
-import json
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -143,7 +142,7 @@ def _create_tables(conn):
         )
     """)
     
-    # Create dead_letter_queue table
+    # Create dead_letter_queue table WITH resolved_at column
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dead_letter_queue (
             id INTEGER PRIMARY KEY,
@@ -155,6 +154,7 @@ def _create_tables(conn):
             failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             retry_count INTEGER DEFAULT 0,
             resolved BOOLEAN DEFAULT 0,
+            resolved_at TIMESTAMP,
             metadata TEXT
         )
     """)

@@ -30,6 +30,8 @@ class TenantAwareRepository:
     @contextmanager
     def _get_connection(self):
         """Get database connection with row factory"""
+        from contextlib import closing
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -127,11 +129,14 @@ class TenantAwareRepository:
                 print(f"⚠️  Could not delete {self.db_path} - might still be in use")
                 # One more GC attempt
                 gc.collect()
-                time.sleep(0.1)
+                time.sleep(0.2)
                 try:
+                  if os.path.exists(self.db_path):
                     os.remove(self.db_path)
+                    print(f"✅ Deleted test database on second attempt: {self.db_path}")
                 except:
                     pass  # Give up gracefully
+                    print(f"⚠️  Final attempt failed to delete {self.db_path}")
 
 # Singleton instance
 repo = TenantAwareRepository()
