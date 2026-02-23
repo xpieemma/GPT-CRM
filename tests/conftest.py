@@ -1,10 +1,10 @@
-# tests/conftest.py
 import pytest
 import sqlite3
 import os
 import time
 import gc
 import uuid
+import json
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -69,10 +69,18 @@ def setup_test_db():
         tables = cursor.fetchall()
         print(f"📊 Tables in database {actual_db_path}: {[table[0] for table in tables]}")
     
+    # CRITICAL WINDOWS FIX: Explicitly close the setup connection to release the file lock
+    conn.close()
+    
     yield
     
     # 4. Cleanup after tests
     print("\n🧹 Test completed, cleaning up...")
+    
+    # Force one more cleanup before deleting
+    repo.cleanup()
+    gc.collect()
+    time.sleep(0.2)  # Give OS time to release handles
     
     # Try to clean up the main file
     repo.cleanup(force_delete=True)
@@ -81,8 +89,18 @@ def setup_test_db():
     for fallback_file in _fallback_files:
         try:
             if os.path.exists(fallback_file):
-                os.remove(fallback_file)
-                print(f"✅ Cleaned up fallback file: {fallback_file}")
+                # Try multiple times
+                for attempt in range(3):
+                    try:
+                        os.remove(fallback_file)
+                        print(f"✅ Cleaned up fallback file: {fallback_file}")
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(0.2)
+                            gc.collect()
+                        else:
+                            print(f"⚠️  Could not clean up {fallback_file}")
         except Exception as e:
             print(f"⚠️  Could not clean up {fallback_file}: {e}")
 
@@ -155,49 +173,32 @@ def rate_limiter():
 
 @pytest.fixture
 def mock_groq(monkeypatch):
-    """Mock Groq client - works with both direct client and return_value assertions"""
+    """Mock Groq client - injected directly without magic wrappers."""
     from app.outreach_agent import outreach_agent
     
-    # Create a mock usage object with all attributes
+    # 1. Create a mock usage object
     mock_usage = MagicMock(
         prompt_tokens=10,
         completion_tokens=5,
         total_tokens=15
     )
     
-    # Create the completion response
+    # 2. Create the completion response with the required schema_version
     mock_completion = MagicMock()
     mock_completion.choices = [
         MagicMock(
             message=MagicMock(
-                content='{"message": "Hello from mock", "confidence_score": 0.9}'
+                content='{"message": "Hello from mock", "confidence_score": 0.9, "schema_version": "1.0"}'
             )
         )
     ]
     mock_completion.usage = mock_usage
     
-    # Setup the fake client
+    # 3. Setup the fake client
     mock_client = MagicMock()
     mock_client.chat.completions.create = AsyncMock(return_value=mock_completion)
     
-    # Create a wrapper mock that can be used with return_value assertions
-    wrapper_mock = MagicMock()
-    wrapper_mock.return_value = mock_client
-    
-    # Make the wrapper mock act like the client for direct access
-    # This forwards attribute access to the mock_client
-    def getattr_wrapper(name):
-        return getattr(mock_client, name)
-    
-    wrapper_mock.__getattr__ = getattr_wrapper
-    wrapper_mock.chat = mock_client.chat  # Direct access to chat attribute
-    
-    # Swap the live client with the fake client
-    original_client = getattr(outreach_agent, "client", None)
+    # 4. Swap the live client with the fake client directly
     monkeypatch.setattr(outreach_agent, "client", mock_client)
     
-    yield wrapper_mock  # Yield the wrapper that works both ways
-    
-    # Restore original if needed
-    if original_client:
-        monkeypatch.setattr(outreach_agent, "client", original_client)
+    yield mock_client
